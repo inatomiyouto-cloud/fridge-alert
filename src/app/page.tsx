@@ -4,14 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Beef,
+  Camera,
   CheckCircle2,
   FlaskConical,
   Leaf,
+  Loader2,
   Package,
   Plus,
   Refrigerator,
   Trash2,
-  X,
 } from "lucide-react";
 
 const STORAGE_KEY = "fridge-alert-items";
@@ -59,6 +60,18 @@ function isUrgent(days: number): boolean {
   return days <= 0;
 }
 
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Home() {
   const [items, setItems] = useState<FoodItem[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -67,7 +80,10 @@ export default function Home() {
   const [name, setName] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
   const [category, setCategory] = useState<Category>("その他");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const alertSentRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     async function loadItems() {
@@ -198,6 +214,59 @@ export default function Home() {
     setItems((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
+  const handleImageSelect = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+
+      setIsAnalyzing(true);
+      setAnalyzeError(null);
+
+      try {
+        const image = await fileToBase64(file);
+        const response = await fetch("/api/analyze-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image, mimeType: file.type }),
+        });
+
+        const data = (await response.json()) as {
+          items?: { name: string; expiryDate: string; category: Category }[];
+          error?: string;
+        };
+
+        if (!response.ok || !data.items?.length) {
+          throw new Error(data.error ?? "画像の解析に失敗しました");
+        }
+
+        if (data.items.length === 1) {
+          const item = data.items[0];
+          setName(item.name);
+          setExpiryDate(item.expiryDate);
+          setCategory(item.category);
+        } else {
+          setItems((prev) => [
+            ...prev,
+            ...data.items!.map((item) => ({
+              id: crypto.randomUUID(),
+              name: item.name,
+              expiryDate: item.expiryDate,
+              category: item.category,
+            })),
+          ]);
+        }
+      } catch (error) {
+        setAnalyzeError(
+          error instanceof Error ? error.message : "画像の解析に失敗しました"
+        );
+      } finally {
+        setIsAnalyzing(false);
+      }
+    },
+    []
+  );
+
   if (!hydrated) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-sky-50 via-white to-emerald-50">
@@ -293,6 +362,40 @@ export default function Home() {
             <Plus className="h-5 w-5 text-sky-600" />
             食材を登録
           </h2>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={handleImageSelect}
+            disabled={isAnalyzing}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isAnalyzing}
+            className="mb-4 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-sky-200 bg-sky-50/50 px-4 py-3 text-sm font-semibold text-sky-700 transition-all hover:border-sky-300 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isAnalyzing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                AIが解析中...
+              </>
+            ) : (
+              <>
+                <Camera className="h-4 w-4" />
+                📸 写真から自動入力
+              </>
+            )}
+          </button>
+          {analyzeError && (
+            <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+              {analyzeError}
+            </p>
+          )}
+
           <form onSubmit={addItem} className="space-y-4">
             <div>
               <label htmlFor="name" className="mb-1 block text-sm font-medium text-gray-700">
