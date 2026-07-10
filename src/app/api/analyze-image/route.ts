@@ -1,6 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
+export const maxDuration = 30;
+
 const PROMPT = `Analyze the attached receipt or food product image. Extract each food item with:
 - name (in Japanese)
 - expiryDate (YYYY-MM-DD; estimate if unclear, otherwise use 3 days from today)
@@ -28,6 +30,110 @@ function assertAsciiOnly(value: string, label: string): void {
       );
     }
   }
+}
+
+const MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"];
+const MAX_RETRIES = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRetryableError(error: unknown): boolean {
+  const message = getErrorMessage(error);
+  return (
+    message.includes("503") ||
+    message.includes("429") ||
+    message.includes("UNAVAILABLE") ||
+    message.includes("high demand") ||
+    message.includes("overloaded") ||
+    message.includes("RESOURCE_EXHAUSTED")
+  );
+}
+
+function isModelUnavailableError(error: unknown): boolean {
+  const message = getErrorMessage(error);
+  return (
+    message.includes("404") ||
+    message.includes("NOT_FOUND") ||
+    message.includes("no longer available")
+  );
+}
+
+function toUserFriendlyError(error: unknown): string {
+  const message = getErrorMessage(error);
+
+  if (isRetryableError(error)) {
+    return "AIサービスが混雑しています。少し待ってから再度お試しください。";
+  }
+
+  if (message.includes("ByteString")) {
+    return "GEMINI_API_KEY に不正な文字が含まれています。Vercelの環境変数を英数字のみで再設定してください。";
+  }
+
+  return message || "画像の解析に失敗しました";
+}
+
+async function analyzeImageWithGemini(
+  ai: GoogleGenAI,
+  base64Data: string,
+  mimeType: string
+): Promise<string> {
+  let lastError: unknown;
+
+  for (const model of MODELS) {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    data: base64Data,
+                    mimeType,
+                  },
+                },
+                { text: PROMPT },
+              ],
+            },
+          ],
+        });
+
+        const text = response.text;
+        if (!text) {
+          throw new Error("AIから応答がありませんでした");
+        }
+
+        return text;
+      } catch (error) {
+        lastError = error;
+
+        if (isModelUnavailableError(error)) {
+          break;
+        }
+
+        if (isRetryableError(error) && attempt < MAX_RETRIES) {
+          await sleep(1000 * (attempt + 1));
+          continue;
+        }
+
+        if (isRetryableError(error)) {
+          break;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 function normalizeMimeType(mimeType?: string): string {
@@ -126,38 +232,18 @@ export async function POST(request: Request) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: normalizeMimeType(body.mimeType),
-              },
-            },
-            { text: PROMPT },
-          ],
-        },
-      ],
-    });
-
-    const text = response.text;
-    if (!text) {
-      return NextResponse.json(
-        { error: "AIから応答がありませんでした" },
-        { status: 500 }
-      );
-    }
+    const text = await analyzeImageWithGemini(
+      ai,
+      base64Data,
+      normalizeMimeType(body.mimeType)
+    );
 
     const items = parseJsonFromText(text);
     return NextResponse.json({ items });
   } catch (error) {
     console.error("Failed to analyze image:", error);
-    const message =
-      error instanceof Error ? error.message : "画像の解析に失敗しました";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const message = toUserFriendlyError(error);
+    const status = isRetryableError(error) ? 503 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }
