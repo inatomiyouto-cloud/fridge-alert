@@ -72,6 +72,65 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+const MAX_IMAGE_DIMENSION = 1280;
+const MAX_BASE64_LENGTH = 3 * 1024 * 1024;
+
+async function compressImageForUpload(
+  file: File
+): Promise<{ image: string; mimeType: string }> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(
+    1,
+    MAX_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height)
+  );
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap.close();
+    throw new Error("画像の処理に失敗しました");
+  }
+
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  let quality = 0.85;
+  let dataUrl = canvas.toDataURL("image/jpeg", quality);
+
+  while (dataUrl.length > MAX_BASE64_LENGTH && quality > 0.4) {
+    quality -= 0.1;
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+  }
+
+  const image = dataUrl.split(",")[1];
+  if (!image || dataUrl.length > MAX_BASE64_LENGTH) {
+    throw new Error("画像が大きすぎます。別の写真をお試しください。");
+  }
+
+  return { image, mimeType: "image/jpeg" };
+}
+
+async function prepareImageForUpload(
+  file: File
+): Promise<{ image: string; mimeType: string }> {
+  try {
+    return await compressImageForUpload(file);
+  } catch {
+    const image = await fileToBase64(file);
+    if (image.length > MAX_BASE64_LENGTH) {
+      throw new Error(
+        "画像が大きすぎます。もう一度撮影するか、別の画像をお試しください。"
+      );
+    }
+    return { image, mimeType: file.type || "image/jpeg" };
+  }
+}
+
 export default function Home() {
   const [items, setItems] = useState<FoodItem[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -224,17 +283,34 @@ export default function Home() {
       setAnalyzeError(null);
 
       try {
-        const image = await fileToBase64(file);
+        const { image, mimeType } = await prepareImageForUpload(file);
         const response = await fetch("/api/analyze-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image, mimeType: file.type }),
+          body: JSON.stringify({ image, mimeType }),
         });
 
-        const data = (await response.json()) as {
+        const responseText = await response.text();
+        let data: {
           items?: { name: string; expiryDate: string; category: Category }[];
           error?: string;
         };
+
+        try {
+          data = JSON.parse(responseText) as typeof data;
+        } catch {
+          if (
+            response.status === 413 ||
+            responseText.includes("Request Entity")
+          ) {
+            throw new Error(
+              "画像が大きすぎます。もう一度撮影するか、別の画像をお試しください。"
+            );
+          }
+          throw new Error(
+            "サーバーからの応答が不正です。しばらくしてから再度お試しください。"
+          );
+        }
 
         if (!response.ok || !data.items?.length) {
           throw new Error(data.error ?? "画像の解析に失敗しました");
