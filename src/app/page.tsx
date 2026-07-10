@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Beef,
@@ -67,6 +67,7 @@ export default function Home() {
   const [name, setName] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
   const [category, setCategory] = useState<Category>("その他");
+  const alertSentRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -100,6 +101,27 @@ export default function Home() {
   useEffect(() => {
     if (hydrated && urgentCount > 0) setShowAlert(true);
   }, [hydrated, urgentCount]);
+
+  useEffect(() => {
+    if (!hydrated || !showAlert || urgentCount === 0 || alertSentRef.current) return;
+
+    alertSentRef.current = true;
+
+    const urgentItems = items
+      .filter((item) => isUrgent(daysUntilExpiry(item.expiryDate)))
+      .map((item) => ({
+        name: item.name,
+        days: daysUntilExpiry(item.expiryDate),
+      }));
+
+    fetch("/api/send-alert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: urgentItems }),
+    }).catch((error) => {
+      console.error("Failed to send LINE alert:", error);
+    });
+  }, [hydrated, showAlert, urgentCount, items]);
 
   const addItem = useCallback(
     (e: React.FormEvent) => {
