@@ -70,18 +70,65 @@ export default function Home() {
   const alertSentRef = useRef(false);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setItems(JSON.parse(raw) as FoodItem[]);
-    } catch {
-      setItems([]);
+    async function loadItems() {
+      try {
+        const response = await fetch("/api/items");
+        const data = (await response.json()) as {
+          items?: FoodItem[] | null;
+          synced?: boolean;
+        };
+
+        if (data.synced && Array.isArray(data.items)) {
+          if (data.items.length > 0) {
+            setItems(data.items);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data.items));
+          } else {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            const localItems = raw ? (JSON.parse(raw) as FoodItem[]) : [];
+            setItems(localItems);
+
+            if (localItems.length > 0) {
+              await fetch("/api/items", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ items: localItems }),
+              });
+            }
+          }
+        } else {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) setItems(JSON.parse(raw) as FoodItem[]);
+        }
+      } catch {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) setItems(JSON.parse(raw) as FoodItem[]);
+        } catch {
+          setItems([]);
+        }
+      }
+      setHydrated(true);
     }
-    setHydrated(true);
+
+    loadItems();
   }, []);
 
   useEffect(() => {
     if (!hydrated) return;
+
     localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+
+    const timer = setTimeout(() => {
+      fetch("/api/items", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      }).catch((error) => {
+        console.error("Failed to sync items:", error);
+      });
+    }, 500);
+
+    return () => clearTimeout(timer);
   }, [items, hydrated]);
 
   const sortedItems = useMemo(
@@ -400,7 +447,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-10 pb-6 text-center text-xs text-gray-400">
-          データはこのブラウザの LocalStorage に保存されます
+          データはクラウドに保存され、PC・スマホで共有されます
         </footer>
       </div>
     </div>
