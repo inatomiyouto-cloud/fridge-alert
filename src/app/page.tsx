@@ -333,8 +333,12 @@ export default function Home() {
           ]);
         }
       } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "画像の解析に失敗しました";
         setAnalyzeError(
-          error instanceof Error ? error.message : "画像の解析に失敗しました"
+          message.includes("ByteString")
+            ? "GEMINI_API_KEY に不正な文字が含まれています。Vercelの環境変数を英数字のみで再設定してください。"
+            : message
         );
       } finally {
         setIsAnalyzing(false);

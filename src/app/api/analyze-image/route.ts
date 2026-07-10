@@ -1,8 +1,39 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
-const PROMPT = `添付されたレシートまたは食材の画像から、食材の名前と賞味期限（予測でも可、不明なら3日後の日付、フォーマットはYYYY-MM-DD）を推測し、以下のJSON形式でのみ返却してください。余計な解説のテキストは一切不要です。
+const PROMPT = `Analyze the attached receipt or food product image. Extract each food item with:
+- name (in Japanese)
+- expiryDate (YYYY-MM-DD; estimate if unclear, otherwise use 3 days from today)
+- category (one of: meat_fish, vegetable, seasoning, other)
+
+Return ONLY a JSON array with no extra text or markdown:
 [{"name": "食材名", "expiryDate": "YYYY-MM-DD", "category": "meat_fish | vegetable | seasoning | other"}]`;
+
+const ALLOWED_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+]);
+
+function sanitizeApiKey(key: string): string {
+  return key.trim().replace(/^["'""''«»]+|["'""''«»]+$/g, "");
+}
+
+function assertAsciiOnly(value: string, label: string): void {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 255) {
+      throw new Error(
+        `${label}に無効な文字が含まれています。Vercelの環境変数を再設定してください。`
+      );
+    }
+  }
+}
+
+function normalizeMimeType(mimeType?: string): string {
+  const normalized = (mimeType || "image/jpeg").toLowerCase();
+  return ALLOWED_MIME_TYPES.has(normalized) ? normalized : "image/jpeg";
+}
 
 type AiCategory = "meat_fish" | "vegetable" | "seasoning" | "other";
 
@@ -66,13 +97,16 @@ function parseJsonFromText(text: string): AnalyzedItem[] {
 
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const rawApiKey = process.env.GEMINI_API_KEY;
+    if (!rawApiKey) {
       return NextResponse.json(
         { error: "GEMINI_API_KEY が設定されていません" },
         { status: 500 }
       );
     }
+
+    const apiKey = sanitizeApiKey(rawApiKey);
+    assertAsciiOnly(apiKey, "GEMINI_API_KEY");
 
     const body = (await request.json()) as {
       image?: string;
@@ -96,12 +130,17 @@ export async function POST(request: Request) {
       model: "gemini-2.5-flash",
       contents: [
         {
-          inlineData: {
-            data: base64Data,
-            mimeType: body.mimeType || "image/jpeg",
-          },
+          role: "user",
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: normalizeMimeType(body.mimeType),
+              },
+            },
+            { text: PROMPT },
+          ],
         },
-        PROMPT,
       ],
     });
 
