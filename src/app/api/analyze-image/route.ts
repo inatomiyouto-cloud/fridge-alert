@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
 
 export const maxDuration = 30;
@@ -6,10 +6,9 @@ export const maxDuration = 30;
 const PROMPT = `Analyze the attached receipt or food product image. Extract each food item with:
 - name (in Japanese)
 - expiryDate (YYYY-MM-DD; estimate if unclear, otherwise use 3 days from today)
-- category (one of: meat_fish, vegetable, seasoning, other)
+- category (one of: meat_fish, vegetable, seasoning, other)`;
 
-Return ONLY a JSON array with no extra text or markdown:
-[{"name": "食材名", "expiryDate": "YYYY-MM-DD", "category": "meat_fish | vegetable | seasoning | other"}]`;
+const MODELS = ["gemini-3.1-flash-lite", "gemini-3-flash-preview"];
 
 const ALLOWED_MIME_TYPES = new Set([
   "image/jpeg",
@@ -30,13 +29,6 @@ function assertAsciiOnly(value: string, label: string): void {
       );
     }
   }
-}
-
-const MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview"];
-const MAX_RETRIES = 2;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getErrorMessage(error: unknown): string {
@@ -67,8 +59,16 @@ function isModelUnavailableError(error: unknown): boolean {
 function toUserFriendlyError(error: unknown): string {
   const message = getErrorMessage(error);
 
+  if (
+    message.includes("Timeout") ||
+    message.includes("timeout") ||
+    message.includes("504")
+  ) {
+    return "解析に時間がかかりすぎました。もう一度お試しください。";
+  }
+
   if (isRetryableError(error)) {
-    return "AIサービスが混雑しています。少し待ってから再度お試しください。";
+    return "AIサービスが混雑しています。数分後に再度お試しください。";
   }
 
   if (message.includes("ByteString")) {
@@ -76,64 +76,6 @@ function toUserFriendlyError(error: unknown): string {
   }
 
   return message || "画像の解析に失敗しました";
-}
-
-async function analyzeImageWithGemini(
-  ai: GoogleGenAI,
-  base64Data: string,
-  mimeType: string
-): Promise<string> {
-  let lastError: unknown;
-
-  for (const model of MODELS) {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    data: base64Data,
-                    mimeType,
-                  },
-                },
-                { text: PROMPT },
-              ],
-            },
-          ],
-        });
-
-        const text = response.text;
-        if (!text) {
-          throw new Error("AIから応答がありませんでした");
-        }
-
-        return text;
-      } catch (error) {
-        lastError = error;
-
-        if (isModelUnavailableError(error)) {
-          break;
-        }
-
-        if (isRetryableError(error) && attempt < MAX_RETRIES) {
-          await sleep(1000 * (attempt + 1));
-          continue;
-        }
-
-        if (isRetryableError(error)) {
-          break;
-        }
-
-        throw error;
-      }
-    }
-  }
-
-  throw lastError;
 }
 
 function normalizeMimeType(mimeType?: string): string {
@@ -180,14 +122,17 @@ type AnalyzedItem = {
   category: Category;
 };
 
-function parseJsonFromText(text: string): AnalyzedItem[] {
+function parseItemsFromText(text: string): AnalyzedItem[] {
   const trimmed = text.trim();
-  const jsonMatch = trimmed.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
+  const jsonText = trimmed.startsWith("[")
+    ? trimmed
+    : trimmed.match(/\[[\s\S]*\]/)?.[0];
+
+  if (!jsonText) {
     throw new Error("AIの応答からJSONを抽出できませんでした");
   }
 
-  const parsed = JSON.parse(jsonMatch[0]) as AiAnalyzedItem[];
+  const parsed = JSON.parse(jsonText) as AiAnalyzedItem[];
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("食材が検出されませんでした");
   }
@@ -199,6 +144,68 @@ function parseJsonFromText(text: string): AnalyzedItem[] {
       expiryDate: normalizeExpiryDate(item.expiryDate),
       category: normalizeCategory(item.category),
     }));
+}
+
+async function analyzeImageWithGemini(
+  ai: GoogleGenAI,
+  base64Data: string,
+  mimeType: string
+): Promise<string> {
+  let lastError: unknown;
+
+  for (const model of MODELS) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  data: base64Data,
+                  mimeType,
+                },
+              },
+              { text: PROMPT },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseJsonSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING },
+                expiryDate: { type: Type.STRING },
+                category: { type: Type.STRING },
+              },
+              required: ["name", "expiryDate", "category"],
+            },
+          },
+        },
+      });
+
+      const text = response.text;
+      if (!text) {
+        throw new Error("AIから応答がありませんでした");
+      }
+
+      return text;
+    } catch (error) {
+      lastError = error;
+
+      if (isModelUnavailableError(error)) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 export async function POST(request: Request) {
@@ -238,7 +245,7 @@ export async function POST(request: Request) {
       normalizeMimeType(body.mimeType)
     );
 
-    const items = parseJsonFromText(text);
+    const items = parseItemsFromText(text);
     return NextResponse.json({ items });
   } catch (error) {
     console.error("Failed to analyze image:", error);

@@ -307,6 +307,11 @@ export default function Home() {
               "画像が大きすぎます。もう一度撮影するか、別の画像をお試しください。"
             );
           }
+          if (response.status === 504 || responseText.includes("Timeout")) {
+            throw new Error(
+              "解析に時間がかかりすぎました。もう一度お試しください。"
+            );
+          }
           throw new Error(
             "サーバーからの応答が不正です。しばらくしてから再度お試しください。"
           );
@@ -461,7 +466,7 @@ export default function Home() {
             {isAnalyzing ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                AIが解析中...
+                AIが解析中...（10秒ほど）
               </>
             ) : (
               <>
